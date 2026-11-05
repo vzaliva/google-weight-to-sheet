@@ -1,0 +1,35 @@
+[project]
+name = "google-weight-to-sheet"
+version = "0.1.0"
+description = "Sync body weight from the Google Health API (Fitbit Aria and other scales) into a Google Sheet"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Vadim Zaliva" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "google-auth>=2.62.1",
+    "google-auth-oauthlib>=1.5.0",
+    "requests>=2.34.2",
+]
+
+[project.urls]
+Repository = "https://github.com/vzaliva/google-weight-to-sheet"
+
+[project.scripts]
+google-weight-to-sheet = "google_weight_to_sheet.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

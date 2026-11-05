@@ -1,0 +1,20 @@
+# Credentials and per-machine configuration. Never commit these.
+token.json
+client_secret*.json
+credentials.json
+config.toml
+*.token
+
+# Raw API dumps made with --dump may contain personal health data.
+dump*.json
+*.dump.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
