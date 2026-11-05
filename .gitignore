@@ -1,5 +1,6 @@
 # Credentials and per-machine configuration. Never commit these.
 token.json
+*_token.json
 client_secret*.json
 credentials.json
 config.toml

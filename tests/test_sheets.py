@@ -77,3 +77,9 @@ def test_append_rows_sends_raw_values():
     assert call["url"].endswith("/id/values/%27Weight%27%21A%3AE:append")
     assert call["params"] == {"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"}
     assert call["json"] == {"majorDimension": "ROWS", "values": [["x", 1.5]]}
+
+
+def test_get_title_asks_only_for_the_title():
+    session = FakeSession(FakeResponse(200, {"properties": {"title": "Weight Logs"}}))
+    assert sheets.get_title(session, "id") == "Weight Logs"
+    assert session.calls[0]["params"] == {"fields": "properties.title"}

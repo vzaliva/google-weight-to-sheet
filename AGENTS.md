@@ -28,7 +28,8 @@ explains setup and operation.
 ## Layout
 
 - `src/google_weight_to_sheet/`
-  - `auth.py` OAuth (one token for the Health and Sheets scopes)
+  - `auth.py` OAuth, with a separate token per API (the Health API rejects a
+    token that also carries the Sheets scope)
   - `health.py` Health API requests and parsing
   - `sheets.py` Sheets API requests and the cell text formats
   - `sync.py` which readings are new, and the date window

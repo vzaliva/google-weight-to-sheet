@@ -154,7 +154,8 @@ class SyncResult:
 
 
 def run_sync(
-    session: Any,
+    health_session: Any,
+    sheets_session: Any,
     cfg: Config,
     *,
     dry_run: bool = False,
@@ -164,11 +165,11 @@ def run_sync(
     dump_path: Path | None = None,
 ) -> SyncResult:
     spreadsheet_id = cfg.require_spreadsheet_id()
-    rows = sheets.read_rows(session, spreadsheet_id, cfg.sheet_name)
+    rows = sheets.read_rows(sheets_session, spreadsheet_id, cfg.sheet_name)
     index = index_rows(rows)
     start, end = choose_window(index, today or date.today(), days=days, since=since)
 
-    points = list(health.list_weight_points(session, start, end))
+    points = list(health.list_weight_points(health_session, start, end))
     if dump_path is not None:
         payload = {"start": start.isoformat(), "end": end.isoformat(), "dataPoints": points}
         write_private(dump_path, json.dumps(payload, indent=2) + "\n")
@@ -177,7 +178,7 @@ def run_sync(
     decisions = plan_rows(readings, index, cfg.unit_label)
     new_rows = [d.row for d in decisions if d.row is not None]
     if new_rows and not dry_run:
-        sheets.append_rows(session, spreadsheet_id, cfg.sheet_name, new_rows)
+        sheets.append_rows(sheets_session, spreadsheet_id, cfg.sheet_name, new_rows)
     return SyncResult(
         start=start,
         end=end,

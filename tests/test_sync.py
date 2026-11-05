@@ -159,7 +159,7 @@ def test_run_appends_only_what_is_missing(tmp_path):
         make_point("fresh", 2026, 11, 4, 7, 30, 79000),
     ]
     session = routed([LEGACY_ROW], points)
-    result = sync.run_sync(session, make_cfg(tmp_path), today=TODAY)
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
 
     assert [d.action for d in result.decisions] == ["skip-match", "new"]
     assert result.appended == 1
@@ -170,7 +170,7 @@ def test_run_appends_only_what_is_missing(tmp_path):
 
 def test_dry_run_writes_nothing(tmp_path):
     session = routed([], [make_point("fresh", 2026, 11, 4, 7, 30, 79000)])
-    result = sync.run_sync(session, make_cfg(tmp_path), dry_run=True, today=TODAY)
+    result = sync.run_sync(session, session, make_cfg(tmp_path), dry_run=True, today=TODAY)
     assert result.count("new") == 1
     assert result.appended == 0
     assert not [c for c in session.calls if c["method"] == "POST"]
@@ -178,7 +178,7 @@ def test_dry_run_writes_nothing(tmp_path):
 
 def test_nothing_new_means_no_append(tmp_path):
     session = routed([LEGACY_ROW], [make_point("old", 2026, 11, 2, 7, 1, 79400)])
-    result = sync.run_sync(session, make_cfg(tmp_path), today=TODAY)
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
     assert result.appended == 0
     assert not [c for c in session.calls if c["method"] == "POST"]
 
@@ -186,11 +186,11 @@ def test_nothing_new_means_no_append(tmp_path):
 def test_running_twice_does_not_duplicate(tmp_path):
     points = [make_point("fresh", 2026, 11, 4, 7, 30, 79000)]
     first = routed([LEGACY_ROW], points)
-    sync.run_sync(first, make_cfg(tmp_path), today=TODAY)
+    sync.run_sync(first, first, make_cfg(tmp_path), today=TODAY)
     appended = next(c for c in first.calls if c["method"] == "POST")["json"]["values"]
 
     second = routed([LEGACY_ROW, *appended], points)
-    result = sync.run_sync(second, make_cfg(tmp_path), today=TODAY)
+    result = sync.run_sync(second, second, make_cfg(tmp_path), today=TODAY)
     assert result.appended == 0
     assert result.decisions[0].action == "skip-id"
 
@@ -199,11 +199,30 @@ def test_dump_saves_the_raw_response_privately(tmp_path):
     point = make_point("fresh", 2026, 11, 4, 7, 30, 79000)
     session = routed([], [point])
     dump = tmp_path / "raw.json"
-    sync.run_sync(session, make_cfg(tmp_path), dry_run=True, today=TODAY, dump_path=dump)
+    sync.run_sync(session, session, make_cfg(tmp_path), dry_run=True, today=TODAY, dump_path=dump)
     assert json.loads(dump.read_text())["dataPoints"] == [point]
     assert dump.stat().st_mode & 0o777 == 0o600
 
 
 def test_run_requires_a_spreadsheet(tmp_path):
     with pytest.raises(ConfigError):
-        sync.run_sync(FakeSession(), Config(config_dir=tmp_path), today=TODAY)
+        sync.run_sync(FakeSession(), FakeSession(), Config(config_dir=tmp_path), today=TODAY)
+
+
+def test_health_and_sheets_requests_use_their_own_session(tmp_path):
+    points = [make_point("fresh", 2026, 11, 4, 7, 30, 79000)]
+
+    def health_handler(method, url, params, body):
+        return FakeResponse(200, {"dataPoints": points})
+
+    def sheets_handler(method, url, params, body):
+        return FakeResponse(200, {"values": [LEGACY_ROW]} if method == "GET" else {})
+
+    health_session = FakeSession(handler=health_handler)
+    sheets_session = FakeSession(handler=sheets_handler)
+    sync.run_sync(health_session, sheets_session, make_cfg(tmp_path), today=TODAY)
+
+    assert health_session.calls
+    assert all("health.googleapis.com" in c["url"] for c in health_session.calls)
+    assert all("sheets.googleapis.com" in c["url"] for c in sheets_session.calls)
+    assert {c["method"] for c in sheets_session.calls} == {"GET", "POST"}

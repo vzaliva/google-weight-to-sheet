@@ -1,13 +1,19 @@
-"""OAuth for the Health API and the Sheets API, with one token for both.
+"""OAuth for the Health API and the Sheets API, with one token for each.
 
-The one-time browser consent happens with `authorize` on a machine that has a
-browser. The resulting token file is then copied to wherever the sync runs;
-`load_credentials` refreshes it from there without any interaction.
+The Health API rejects a token that also carries a scope outside its own: it
+answers 403 DISALLOWED_OAUTH_SCOPES. So the two APIs cannot share a token. Each
+gets its own consent and its own token file, both made with the same OAuth
+client.
+
+The browser consent happens with `authorize` on a machine that has a browser.
+The token files are then copied to wherever the sync runs; `load_credentials`
+refreshes them from there without any interaction.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +24,22 @@ HEALTH_SCOPE = (
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly"
 )
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-SCOPES = (HEALTH_SCOPE, SHEETS_SCOPE)
+
+
+@dataclass(frozen=True)
+class Service:
+    name: str
+    scopes: tuple[str, ...]
+    token_file: str
+
+
+HEALTH = Service("health", (HEALTH_SCOPE,), "health_token.json")
+SHEETS = Service("sheets", (SHEETS_SCOPE,), "sheets_token.json")
+SERVICES = {service.name: service for service in (HEALTH, SHEETS)}
+
+
+def token_path(cfg: Config, service: Service) -> Path:
+    return cfg.config_dir / service.token_file
 
 
 def write_private(path: Path, text: str) -> None:
@@ -31,12 +52,14 @@ def write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def save_credentials(cfg: Config, creds: Any) -> None:
-    write_private(cfg.token_path, creds.to_json())
+def save_credentials(cfg: Config, service: Service, creds: Any) -> None:
+    write_private(token_path(cfg, service), creds.to_json())
 
 
-def authorize(cfg: Config, *, port: int = 0, open_browser: bool = True) -> Any:
-    """Run the browser consent flow and store the resulting token."""
+def authorize(
+    cfg: Config, service: Service, *, port: int = 0, open_browser: bool = True
+) -> Any:
+    """Run the browser consent flow for one service and store the resulting token."""
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     if not cfg.client_secret_path.exists():
@@ -45,41 +68,48 @@ def authorize(cfg: Config, *, port: int = 0, open_browser: bool = True) -> Any:
             "the Google Cloud console and save its JSON there"
         )
     flow = InstalledAppFlow.from_client_secrets_file(
-        str(cfg.client_secret_path), list(SCOPES)
+        str(cfg.client_secret_path), list(service.scopes)
     )
     # prompt=consent makes Google return a refresh token even on a repeat grant.
     creds = flow.run_local_server(
         port=port,
         open_browser=open_browser,
         prompt="consent",
-        authorization_prompt_message="Open this URL in a browser to authorise:\n{url}\n",
+        authorization_prompt_message=(
+            f"Open this URL in a browser to authorise {service.name} access:\n{{url}}\n"
+        ),
     )
-    save_credentials(cfg, creds)
+    save_credentials(cfg, service, creds)
     return creds
 
 
-def load_credentials(cfg: Config) -> Any:
-    """Load the stored token, refreshing it when it has expired."""
+def load_credentials(cfg: Config, service: Service) -> Any:
+    """Load a stored token, refreshing it when it has expired."""
     from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
-    if not cfg.token_path.exists():
+    path = token_path(cfg, service)
+    if not path.exists():
         raise AuthError(
-            f"no token at {cfg.token_path}: run `google-weight-to-sheet auth` on a "
-            "machine with a browser and copy token.json here"
+            f"no {service.name} token at {path}: run `google-weight-to-sheet auth "
+            f"{service.name}` on a machine with a browser and copy the file here"
         )
-    creds = Credentials.from_authorized_user_file(str(cfg.token_path), list(SCOPES))
+    creds = Credentials.from_authorized_user_file(str(path), list(service.scopes))
     if not creds.valid:
         if not creds.refresh_token:
-            raise AuthError("the stored token has no refresh token: run `auth` again")
+            raise AuthError(
+                f"the {service.name} token has no refresh token: "
+                f"run `auth {service.name}` again"
+            )
         try:
             creds.refresh(Request())
         except RefreshError as exc:
             raise AuthError(
-                f"could not refresh the token ({exc}): run `auth` again"
+                f"could not refresh the {service.name} token ({exc}): "
+                f"run `auth {service.name}` again"
             ) from exc
-        save_credentials(cfg, creds)
+        save_credentials(cfg, service, creds)
     return creds
 
 

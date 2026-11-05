@@ -34,13 +34,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config-dir",
         type=Path,
-        help="directory with config.toml, client_secret.json and token.json "
+        help="directory with config.toml, client_secret.json and the token files "
         "(default: ~/.config/google-weight-to-sheet)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
     p_auth = commands.add_parser(
-        "auth", help="authorise in a browser and store the token (run where a browser is)"
+        "auth", help="authorise in a browser and store the tokens (run where a browser is)"
+    )
+    p_auth.add_argument(
+        "service",
+        nargs="?",
+        choices=[*auth.SERVICES, "all"],
+        default="all",
+        help="which API to authorise; each one is a separate consent (default: all)",
     )
     p_auth.add_argument(
         "--no-browser", action="store_true", help="print the URL instead of opening it"
@@ -87,14 +94,11 @@ def _stamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _open_session(cfg: Config) -> Any:
-    return auth.make_session(auth.load_credentials(cfg))
+def _open_session(cfg: Config, service: auth.Service) -> Any:
+    return auth.make_session(auth.load_credentials(cfg, service))
 
 
-def cmd_auth(cfg: Config, args: argparse.Namespace) -> int:
-    creds = auth.authorize(cfg, port=args.port, open_browser=not args.no_browser)
-    print(f"token saved to {cfg.token_path}")
-    session = auth.make_session(creds)
+def _verify_health(session: Any) -> None:
     try:
         identity = health.get_identity(session)
     except ApiError as exc:
@@ -104,14 +108,36 @@ def cmd_auth(cfg: Config, args: argparse.Namespace) -> int:
                 "to the Google Health app with it, then run `check`.",
                 file=sys.stderr,
             )
-            return 0
+            return
         raise
     print(f"signed in to the Health API as {identity.get('healthUserId', '<unknown id>')}")
+
+
+def _verify_sheets(cfg: Config, session: Any) -> None:
+    if not cfg.spreadsheet_id:
+        print("no spreadsheet configured yet, so the Sheets token was not tried")
+        return
+    print(f"can open the spreadsheet {sheets.get_title(session, cfg.spreadsheet_id)!r}")
+
+
+def cmd_auth(cfg: Config, args: argparse.Namespace) -> int:
+    names = list(auth.SERVICES) if args.service == "all" else [args.service]
+    for name in names:
+        service = auth.SERVICES[name]
+        creds = auth.authorize(
+            cfg, service, port=args.port, open_browser=not args.no_browser
+        )
+        print(f"{name} token saved to {auth.token_path(cfg, service)}")
+        session = auth.make_session(creds)
+        if service is auth.HEALTH:
+            _verify_health(session)
+        else:
+            _verify_sheets(cfg, session)
     return 0
 
 
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
-    session = _open_session(cfg)
+    session = _open_session(cfg, auth.HEALTH)
     identity = health.get_identity(session)
     print(f"Health API user: {identity.get('healthUserId', '<unknown id>')}")
     today = date.today()
@@ -164,9 +190,11 @@ def format_report(result: sync.SyncResult, cfg: Config, *, dry_run: bool, verbos
 
 
 def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
-    session = _open_session(cfg)
+    health_session = _open_session(cfg, auth.HEALTH)
+    sheets_session = _open_session(cfg, auth.SHEETS)
     result = sync.run_sync(
-        session,
+        health_session,
+        sheets_session,
         cfg,
         dry_run=args.dry_run,
         days=args.days,

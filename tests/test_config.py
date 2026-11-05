@@ -11,7 +11,6 @@ def test_defaults_when_there_is_no_file(tmp_path):
     assert cfg.spreadsheet_id is None
     assert cfg.sheet_name == "Weight"
     assert cfg.unit_label == "pounds"
-    assert cfg.token_path == tmp_path / "token.json"
     assert cfg.client_secret_path == tmp_path / "client_secret.json"
 
 

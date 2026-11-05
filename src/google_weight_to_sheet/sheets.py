@@ -93,6 +93,17 @@ def _values_url(spreadsheet_id: str, sheet_name: str, cells: str) -> str:
     return f"{API_URL}/{quote(spreadsheet_id, safe='')}/values/{rng}"
 
 
+def get_title(session: Any, spreadsheet_id: str) -> str:
+    """The spreadsheet's title; a cheap way to prove the token can open it."""
+    body = request_json(
+        session,
+        "GET",
+        f"{API_URL}/{quote(spreadsheet_id, safe='')}",
+        params={"fields": "properties.title"},
+    )
+    return body["properties"]["title"]
+
+
 def read_rows(session: Any, spreadsheet_id: str, sheet_name: str) -> list[list[Any]]:
     """All data rows (everything below the header), columns A to E.
 

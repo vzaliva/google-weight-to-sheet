@@ -27,10 +27,6 @@ class Config:
     unit_label: str = DEFAULT_UNIT_LABEL
 
     @property
-    def token_path(self) -> Path:
-        return self.config_dir / "token.json"
-
-    @property
     def client_secret_path(self) -> Path:
         return self.config_dir / "client_secret.json"
 

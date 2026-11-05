@@ -7,9 +7,10 @@ cron and the sheet stays current.
 It replaces the many "Fitbit to Google Sheets" scripts that used the legacy
 Fitbit Web API, which Google switched off in early November 2026.
 
-> **Status:** early version. The unit tests pass, but it has not yet been run
-> against a live account. Run `check` first and compare its output with the
-> response shape described below.
+> **Status:** early version. The unit tests pass, and `auth` and `check` have
+> been run against a live Google Health account, which confirmed the response
+> shape described below. A full `sync` into a sheet that already holds rows has
+> not been run yet. Run `check` and `sync --dry-run` first.
 
 ## What it does
 
@@ -41,9 +42,13 @@ removed.
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/). It installs a suitable Python by itself.
-- A Google Account whose Google Health data holds your weigh-ins. Sign in to the
-  Google Health app with that account at least once, or the API answers
-  `ACCOUNT_NOT_LINKED`.
+- A **personal** Google Account whose Google Health data holds your weigh-ins.
+  Google Health refuses Google Workspace (work or school) accounts with "Can't use
+  this Google Account with Google Health". Sign in to the Google Health app with
+  the account at least once, or the API answers `ACCOUNT_NOT_LINKED`.
+- Access to the spreadsheet from a Google account. It can be a different account
+  from the Health one, since each API gets its own token, so a Workspace-owned
+  sheet works.
 - A Google Cloud project, to get OAuth credentials (free for this use).
 - A spreadsheet with a header row and a tab for the data.
 
@@ -56,15 +61,18 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 1. Create a project, or pick one.
 2. Enable two APIs: **Google Health API** (`health.googleapis.com`) and
    **Google Sheets API**.
-3. Configure the OAuth consent screen (the *Audience* page):
-   - **Google Workspace account:** choose **Internal**. There is no test-user
-     list, no verification, and no 7-day refresh-token limit.
-   - **Personal Gmail:** choose **External**, add yourself as a test user, then
-     **publish** the app. While an External app is in *Testing*, refresh tokens
-     expire after 7 days and the daily job would stop working every week.
+3. Configure the OAuth consent screen (the *Audience* page). Choose
+   **External** and add the Google account(s) you will authorise with as test
+   users. Once everything works, **publish** the app: while an External app is
+   in *Testing*, refresh tokens expire after 7 days and the daily job would stop
+   working every week. (An Internal app is not an option: it admits only accounts
+   from your own Workspace organisation, and Google Health does not accept those.)
 4. On the *Data Access* page, add these scopes:
    - `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly`
    - `https://www.googleapis.com/auth/spreadsheets`
+
+   Both are declared on the same consent screen, but the tool requests them in
+   two separate consents (see step 3).
 5. Create an **OAuth client ID** of type **Desktop app**, download its JSON, and
    save it as `~/.config/google-weight-to-sheet/client_secret.json`.
 
@@ -90,20 +98,24 @@ On a machine with a browser:
 uv run google-weight-to-sheet auth
 ```
 
-This opens the Google consent page, then stores `token.json` (mode 0600) in the
-config directory. `token.json` contains a refresh token and the client secret, so
-treat it like a password.
+This runs **two** consents one after the other, one per API, because the Health
+API refuses (`403 DISALLOWED_OAUTH_SCOPES`) any token that also carries another
+scope such as Sheets. Approve the Health consent first, then the Sheets one. You
+end up with `health_token.json` and `sheets_token.json` (mode 0600) in the config
+directory. Each contains a refresh token and the client secret, so treat them
+like passwords. `auth health` or `auth sheets` redoes just one of them.
 
-To run the sync on another machine, such as a server, copy the token there:
+To run the sync on another machine, such as a server, copy the tokens there
+(bash):
 
 ```sh
 ssh server 'mkdir -p -m 700 ~/.config/google-weight-to-sheet'
-scp ~/.config/google-weight-to-sheet/token.json server:.config/google-weight-to-sheet/
+scp ~/.config/google-weight-to-sheet/{health_token,sheets_token}.json server:.config/google-weight-to-sheet/
 scp ~/.config/google-weight-to-sheet/config.toml server:.config/google-weight-to-sheet/
 ```
 
 The server does not need `client_secret.json` or a browser. It refreshes the
-token on its own. To authorise on the server itself instead, forward the
+tokens on its own. To authorise on the server itself instead, forward the
 redirect port and use `auth --no-browser --port 8085` with
 `ssh -L 8085:localhost:8085 server`.
 
@@ -139,7 +151,7 @@ older than your newest row should say `skip`.
 
 | Command | What it does |
 |---------|--------------|
-| `auth [--no-browser] [--port N]` | Browser consent; stores the token |
+| `auth [health\|sheets\|all] [--no-browser] [--port N]` | Browser consent for each API; stores the tokens |
 | `check [--days N] [--dump FILE]` | Verifies access, shows the newest raw data point |
 | `sync [--dry-run] [--days N \| --since YYYY-MM-DD] [--dump FILE] [-v]` | Appends new weigh-ins |
 
@@ -161,9 +173,11 @@ API response and may contain personal data, so keep it out of the repository.
 
 | Message | Meaning |
 |---------|---------|
-| `no token at ...` | Run `auth` and copy `token.json` to this machine |
-| `could not refresh the token` | The refresh token was revoked or expired (an External app left in *Testing* does this after 7 days). Run `auth` again |
+| `no health token at ...` / `no sheets token at ...` | Run `auth` and copy the token files to this machine |
+| `could not refresh the health token` (or `sheets`) | The refresh token was revoked or expired (an External app left in *Testing* does this after 7 days). Run `auth health` or `auth sheets` again |
+| `403 DISALLOWED_OAUTH_SCOPES` | The token used for the Health API carries a scope the Health API does not accept, such as Sheets. Run `auth health`: its token only ever asks for the Health scope |
 | `ACCOUNT_NOT_LINKED` | The Google Account has not been set up in the Google Health app |
+| "Can't use this Google Account with Google Health" (in a browser) | The account is managed by Google Workspace or a school, which Google Health does not support. Use a personal Google account for the Health token |
 | `HTTP 403 ... has not been used in project` | Enable the Google Health API and the Google Sheets API in the Cloud project |
 | `no tab named 'X'` | `sheet_name` does not match the tab. Names are case-sensitive |
 | `row(s) ... have a date this tool cannot read` | Column A holds a date in a format the tool does not know. Those rows are ignored for duplicate checks; new rows are still appended correctly |

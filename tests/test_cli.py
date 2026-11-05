@@ -8,7 +8,7 @@ from google_weight_to_sheet.config import Config
 
 def test_missing_spreadsheet_is_a_clean_error(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("GWTS_SPREADSHEET_ID", raising=False)
-    monkeypatch.setattr(cli, "_open_session", lambda cfg: object())
+    monkeypatch.setattr(cli, "_open_session", lambda cfg, service: object())
     assert cli.main(["--config-dir", str(tmp_path), "sync", "--dry-run"]) == 1
     assert "error: no spreadsheet configured" in capsys.readouterr().err
 
@@ -16,7 +16,7 @@ def test_missing_spreadsheet_is_a_clean_error(tmp_path, capsys, monkeypatch):
 def test_missing_token_is_a_clean_error(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("GWTS_SPREADSHEET_ID", "x")
     assert cli.main(["--config-dir", str(tmp_path), "sync"]) == 1
-    assert "no token" in capsys.readouterr().err
+    assert "no health token" in capsys.readouterr().err
 
 
 def test_days_and_since_are_mutually_exclusive():
@@ -52,3 +52,13 @@ def test_dry_run_report_shows_skips_with_the_reason():
     text = cli.format_report(make_result(), Config(config_dir="."), dry_run=True, verbose=False)
     assert "id=a  (already in the sheet: same date and weight)" in text
     assert "(dry run, nothing written)" in text
+
+
+def test_auth_defaults_to_both_services():
+    assert cli.build_parser().parse_args(["auth"]).service == "all"
+    assert cli.build_parser().parse_args(["auth", "health"]).service == "health"
+
+
+def test_auth_rejects_an_unknown_service():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["auth", "drive"])
