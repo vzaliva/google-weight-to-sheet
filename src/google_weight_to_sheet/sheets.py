@@ -4,7 +4,7 @@ The sheet has five columns, matching the layout the earlier sync used:
   A  date and time, text such as "December 10, 2016 at 03:20PM"
   B  weight
   C  unit label
-  D  BMI (left empty: Withings does not send it)
+  D  BMI, from the weight and the height in the Withings profile
   E  data point id
 """
 

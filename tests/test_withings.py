@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 
 import pytest
-from conftest import FakeResponse, FakeSession, make_group, measure_answer
+from conftest import FakeResponse, FakeSession, make_group, make_height_group, measure_answer
 
 from google_weight_to_sheet import withings
 from google_weight_to_sheet.errors import DataError, WithingsError
@@ -67,13 +67,13 @@ def test_a_non_zero_status_is_an_error_even_with_http_200():
 
 def test_parse_reading_uses_the_account_time_zone():
     group = make_group(5765432101, 2026, 11, 2, 7, 1, 79400, zone="America/Los_Angeles")
+    del group["timezone"]  # a hand-entered weight has no zone of its own
     reading = withings.parse_reading(group, "America/Los_Angeles")
-    assert reading == withings.Reading("5765432101", datetime(2026, 11, 2, 7, 1), 79400.0)
+    assert reading == withings.Reading("5765432101", datetime(2026, 11, 2, 7, 1), 79400.0, 0)
 
 
 def test_parse_reading_prefers_a_zone_on_the_group_itself():
     group = make_group(1, 2026, 11, 2, 7, 1, 79400, zone="Europe/Paris")
-    group["timezone"] = "Europe/Paris"
     assert withings.parse_reading(group, "America/Los_Angeles").local == datetime(2026, 11, 2, 7, 1)
 
 
@@ -88,6 +88,7 @@ def test_parse_reading_follows_daylight_saving_time():
 
 def test_parse_reading_without_any_zone_uses_this_machine():
     group = make_group(1, 2026, 11, 2, 7, 1, 79400)
+    del group["timezone"]
     assert withings.parse_reading(group, None).local == datetime.fromtimestamp(group["date"])
 
 
@@ -107,18 +108,30 @@ def test_parse_reading_picks_the_weight_among_other_measures():
     assert withings.parse_reading(group, "UTC").grams == 79400.0
 
 
-def test_parse_reading_flags_an_ambiguous_weigh_in():
-    group = make_group(1, 2026, 11, 2, 7, 1, 79400, attrib=withings.AMBIGUOUS)
-    assert withings.parse_reading(group, "UTC").ambiguous
-    for attrib in (0, 2, 7, 8):  # by a scale, entered by hand, confirmed, same as 0
-        group["attrib"] = attrib
-        assert not withings.parse_reading(group, "UTC").ambiguous
+@pytest.mark.parametrize("attrib", [0, 2, 7, 8])
+def test_weigh_ins_withings_gives_to_the_user_are_attributed(attrib):
+    # recognised by the scale, entered by hand, confirmed by the user, same as 0
+    group = make_group(1, 2026, 11, 2, 7, 1, 79400, attrib=attrib)
+    assert withings.parse_reading(group, "UTC").attributed
+
+
+@pytest.mark.parametrize("attrib", [1, 4, 10009, None])
+def test_every_other_attrib_is_not_attributed(attrib):
+    # 1 ambiguous, 4 typed in at account creation, 10009 seen live on copies of
+    # other people's weigh-ins, None if Withings ever leaves the field out
+    group = make_group(1, 2026, 11, 2, 7, 1, 79400, attrib=attrib)
+    if attrib is None:
+        del group["attrib"]
+    reading = withings.parse_reading(group, "UTC")
+    assert reading.attrib == attrib
+    assert not reading.attributed
 
 
 def test_parse_reading_rejects_an_unknown_time_zone():
     group = make_group(1, 2026, 11, 2, 7, 1, 79400)
+    group["timezone"] = "Mars/Olympus_Mons"
     with pytest.raises(DataError, match="measure group 1"):
-        withings.parse_reading(group, "Mars/Olympus_Mons")
+        withings.parse_reading(group, "UTC")
 
 
 def test_parse_reading_rejects_a_group_without_a_weight():
@@ -126,3 +139,27 @@ def test_parse_reading_rejects_a_group_without_a_weight():
     group["measures"] = []
     with pytest.raises(DataError, match="cannot read Withings measure group 9"):
         withings.parse_reading(group, "UTC")
+
+
+# --- height ---------------------------------------------------------------------
+
+
+def test_height_is_asked_for_without_a_date_range():
+    session = FakeSession(FakeResponse(200, measure_answer([make_height_group(1, 2015, 175)])))
+    assert withings.latest_height(session) == 1.75
+    assert session.calls[0]["data"] == {"action": "getmeas", "meastype": 4, "category": 1}
+
+
+def test_the_newest_height_of_the_users_own_wins():
+    groups = [
+        make_height_group(1, 2015, 175, attrib=4),  # typed in when the account was made
+        make_height_group(2, 2020, 176, attrib=2),
+        make_height_group(3, 2024, 162, attrib=10009),  # not attributed to the user
+    ]
+    session = FakeSession(FakeResponse(200, measure_answer(groups)))
+    assert withings.latest_height(session) == 1.76
+
+
+def test_no_height_in_the_profile():
+    session = FakeSession(FakeResponse(200, measure_answer([])))
+    assert withings.latest_height(session) is None

@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime
 
 import pytest
-from conftest import FakeResponse, FakeSession, make_group, measure_answer
+from conftest import FakeResponse, FakeSession, make_group, make_height_group, measure_answer
 
 from google_weight_to_sheet import sync, withings
 from google_weight_to_sheet.config import Config
@@ -11,8 +11,8 @@ from google_weight_to_sheet.errors import ConfigError
 TODAY = date(2026, 11, 5)
 
 
-def reading(point_id, when, grams, ambiguous=False):
-    return withings.Reading(point_id, when, grams, ambiguous)
+def reading(point_id, when, grams, attrib=0):
+    return withings.Reading(point_id, when, grams, attrib)
 
 
 # --- units -----------------------------------------------------------------
@@ -24,6 +24,19 @@ def reading(point_id, when, grams, ambiguous=False):
 )
 def test_grams_to_pounds_rounds_to_one_decimal(grams, pounds):
     assert sync.grams_to_pounds(grams) == pounds
+
+
+@pytest.mark.parametrize(
+    ("grams", "height_m", "expected"),
+    [
+        (90000, 1.80, 27.78),
+        (80000, 1.75, 26.12),
+        (80000, None, ""),
+        (80000, 0.0, ""),
+    ],
+)
+def test_bmi_has_two_decimals_or_stays_empty(grams, height_m, expected):
+    assert sync.bmi(grams, height_m) == expected
 
 
 # --- reading the existing sheet --------------------------------------------
@@ -61,6 +74,13 @@ def test_new_rows_have_the_five_column_layout():
     assert decision.row == ["November 3, 2026 at 07:05AM", 175.0, "pounds", "", "abc"]
 
 
+def test_new_rows_carry_a_bmi_when_the_height_is_known():
+    [decision] = sync.plan_rows(
+        [reading("abc", datetime(2026, 11, 3, 7, 5), 79400)], sync.ExistingIndex(), "pounds", 1.80
+    )
+    assert decision.row == ["November 3, 2026 at 07:05AM", 175.0, "pounds", 24.51, "abc"]
+
+
 def test_skips_a_reading_whose_id_is_in_the_sheet():
     index = sync.index_rows([["x", 1, "pounds", "", "abc"]])
     [decision] = sync.plan_rows([reading("abc", datetime(2026, 11, 3, 7, 5), 79400)], index, "pounds")
@@ -83,20 +103,20 @@ def test_a_different_weight_in_the_same_minute_is_new():
     assert decision.action == "new"
 
 
-def test_an_ambiguous_weigh_in_is_left_out():
+def test_a_weigh_in_withings_does_not_attribute_is_left_out():
     [decision] = sync.plan_rows(
-        [reading("amb", datetime(2026, 11, 3, 7, 5), 61000, ambiguous=True)],
+        [reading("other", datetime(2026, 11, 3, 7, 5), 61000, attrib=1)],
         sync.ExistingIndex(),
         "pounds",
     )
-    assert decision.action == "skip-ambiguous"
+    assert decision.action == "skip-unattributed"
     assert decision.row is None
 
 
-def test_an_ambiguous_weigh_in_already_in_the_sheet_is_reported_by_id():
-    index = sync.index_rows([["x", 1, "pounds", "", "amb"]])
+def test_an_unattributed_weigh_in_already_in_the_sheet_is_reported_by_id():
+    index = sync.index_rows([["x", 1, "pounds", "", "other"]])
     [decision] = sync.plan_rows(
-        [reading("amb", datetime(2026, 11, 3, 7, 5), 61000, ambiguous=True)], index, "pounds"
+        [reading("other", datetime(2026, 11, 3, 7, 5), 61000, attrib=1)], index, "pounds"
     )
     assert decision.action == "skip-id"
 
@@ -153,7 +173,7 @@ def make_cfg(tmp_path):
     return Config(config_dir=tmp_path, spreadsheet_id="sheet-id")
 
 
-def routed(rows, groups):
+def routed(rows, groups, heights=()):
     """A session that serves the sheet, the Withings API, and records appends."""
 
     def handler(method, url, params, body):
@@ -161,6 +181,8 @@ def routed(rows, groups):
             return FakeResponse(200, {"values": rows})
         if "sheets.googleapis.com" in url and method == "POST":
             return FakeResponse(200, {})
+        if "wbsapi.withings.net" in url and body["meastype"] == withings.HEIGHT:
+            return FakeResponse(200, measure_answer(list(heights)))
         if "wbsapi.withings.net" in url:
             return FakeResponse(200, measure_answer(groups))
         raise AssertionError(f"unexpected request {method} {url}")
@@ -186,10 +208,26 @@ def test_run_appends_only_what_is_missing(tmp_path):
     assert post[0]["json"]["values"] == [["November 4, 2026 at 07:30AM", 174.2, "pounds", "", "102"]]
 
 
+def test_run_fills_the_bmi_from_the_height_in_the_profile(tmp_path):
+    session = routed(
+        [LEGACY_ROW], [make_group(102, 2026, 11, 4, 7, 30, 79000)], [make_height_group(9, 2015, 175)]
+    )
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
+    assert result.height_m == 1.75
+    [post] = [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
+    assert post["json"]["values"] == [["November 4, 2026 at 07:30AM", 174.2, "pounds", 25.8, "102"]]
+
+
+def test_run_does_not_ask_for_the_height_when_nothing_was_fetched(tmp_path):
+    session = routed([LEGACY_ROW], [])
+    sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
+    assert [c["data"]["meastype"] for c in session.calls if "withings" in c["url"]] == [1]
+
+
 def test_run_asks_withings_for_the_window_with_margin(tmp_path):
     session = routed([LEGACY_ROW], [])
     result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
-    [ask] = [c for c in session.calls if "withings" in c["url"]]
+    [ask] = [c for c in session.calls if "withings" in c["url"] and c["data"]["meastype"] == 1]
     assert (result.start, result.end) == (date(2026, 11, 1), date(2026, 11, 7))
     assert (ask["data"]["startdate"], ask["data"]["enddate"]) == withings.window_timestamps(
         date(2026, 11, 1), date(2026, 11, 7)
@@ -208,13 +246,29 @@ def test_readings_in_the_margin_outside_the_window_are_dropped(tmp_path):
     assert result.fetched == 1
 
 
-def test_an_ambiguous_weigh_in_is_not_written(tmp_path):
-    groups = [make_group(103, 2026, 11, 4, 7, 30, 61000, attrib=withings.AMBIGUOUS)]
+def test_only_weigh_ins_attributed_to_the_user_are_written(tmp_path):
+    # The pattern seen when a second person was added to a shared scale:
+    # Withings attached the other person's earlier weigh-ins to the new user as
+    # attrib 10009, and an unrecognised weigh-in came as attrib 1 plus a 10009
+    # copy, followed by a recognised one two minutes later.
+    groups = [
+        make_group(201, 2026, 11, 2, 18, 0, 90100, attrib=2),  # typed in by hand
+        make_group(202, 2026, 11, 2, 6, 30, 61000, attrib=10009),  # someone else's
+        make_group(203, 2026, 11, 4, 7, 10, 90000, attrib=1),
+        make_group(205, 2026, 11, 4, 7, 10, 90000, attrib=10009),
+        make_group(204, 2026, 11, 4, 7, 12, 90050, attrib=0),
+    ]
     session = routed([LEGACY_ROW], groups)
     result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
-    assert result.count("skip-ambiguous") == 1
-    assert result.appended == 0
-    assert not [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
+    assert {d.reading.point_id: d.action for d in result.decisions} == {
+        "201": "new",
+        "202": "skip-unattributed",
+        "203": "skip-unattributed",
+        "205": "skip-unattributed",
+        "204": "new",
+    }
+    [post] = [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
+    assert [row[4] for row in post["json"]["values"]] == ["201", "204"]
 
 
 def test_dry_run_writes_nothing(tmp_path):

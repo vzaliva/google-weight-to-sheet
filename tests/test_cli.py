@@ -36,26 +36,34 @@ def make_result():
         sync.Decision(
             withings.Reading("b", datetime(2026, 11, 4, 7, 30), 79000),
             "new",
-            ["November 4, 2026 at 07:30AM", 174.2, "pounds", "", "b"],
+            ["November 4, 2026 at 07:30AM", 174.2, "pounds", 24.38, "b"],
         ),
         sync.Decision(
-            withings.Reading("c", datetime(2026, 11, 4, 19, 0), 61000, ambiguous=True),
-            "skip-ambiguous",
+            withings.Reading("c", datetime(2026, 11, 4, 19, 0), 61000, attrib=10009),
+            "skip-unattributed",
         ),
     ]
-    return sync.SyncResult(date(2026, 11, 1), date(2026, 11, 7), 3, decisions, 1, 5, 0)
+    return sync.SyncResult(date(2026, 11, 1), date(2026, 11, 7), 3, decisions, 1, 5, 0, 1.8)
 
 
 def test_report_lists_new_rows_but_hides_skips_by_default():
     text = cli.format_report(make_result(), Config(config_dir="."), dry_run=False, verbose=False)
-    assert "NEW" in text and "id=b" in text
+    assert "NEW" in text and "BMI 24.38  id=b" in text
+    assert "no height" not in text
     assert "id=a" not in text
     assert "fetched=3 new=1 skipped=2 appended=1" in text
 
 
-def test_report_always_shows_an_ambiguous_skip():
+def test_report_always_shows_an_unattributed_skip_with_its_attrib():
     text = cli.format_report(make_result(), Config(config_dir="."), dry_run=False, verbose=False)
-    assert "id=c  (Withings is not sure this weigh-in is yours" in text
+    assert "id=c  (Withings does not say this weigh-in is yours, attrib=10009;" in text
+
+
+def test_report_notes_a_missing_height():
+    result = make_result()
+    result.height_m = None
+    text = cli.format_report(result, Config(config_dir="."), dry_run=False, verbose=False)
+    assert "has no height, so the BMI column is left empty" in text
 
 
 def test_dry_run_report_shows_skips_with_the_reason():

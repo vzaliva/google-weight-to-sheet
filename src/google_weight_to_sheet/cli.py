@@ -17,20 +17,20 @@ SERVICES = ("withings", "sheets")
 _ACTION_TEXT = {
     "new": "NEW ",
     "skip-id": "skip",
-    "skip-ambiguous": "skip",
+    "skip-unattributed": "skip",
     "skip-match": "skip",
 }
 _ACTION_REASON = {
     "new": "",
     "skip-id": "  (already in the sheet: same id)",
-    "skip-ambiguous": (
-        "  (Withings is not sure this weigh-in is yours; confirm it in the Withings app "
-        "and run sync again)"
+    "skip-unattributed": (
+        "  (Withings does not say this weigh-in is yours, attrib={attrib}; if it is, "
+        "assign it to yourself in the Withings app)"
     ),
     "skip-match": "  (already in the sheet: same date and weight)",
 }
 # Shown in the log even without --verbose, because the user has to act on them.
-_ALWAYS_SHOWN = frozenset({"new", "skip-ambiguous"})
+_ALWAYS_SHOWN = frozenset({"new", "skip-unattributed"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,6 +155,8 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     start, end, groups, timezone = _fetch_recent(session, args.days)
     print(f"{len(groups)} weight measurement(s) since {start}")
     print("account time zone:", timezone or "none given, so this machine's is used")
+    height = withings.latest_height(session)
+    print("height in the profile:", f"{height} m" if height else "none, so BMI stays empty")
     if args.dump:
         auth.write_private(args.dump, sync.dump_text(start, end, timezone, groups))
         print(f"raw response saved to {args.dump}")
@@ -166,7 +168,7 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         print(
             f"parsed as: {sheets.format_datetime(reading.local)}, "
             f"{sync.grams_to_pounds(reading.grams)} pounds, id {reading.point_id}"
-            + (" (ambiguous: sync skips it until it is confirmed)" if reading.ambiguous else "")
+            + ("" if reading.attributed else f" (attrib={reading.attrib}: sync skips it)")
         )
     return 0
 
@@ -178,11 +180,17 @@ def format_report(result: sync.SyncResult, cfg: Config, *, dry_run: bool, verbos
         if decision.action not in _ALWAYS_SHOWN and not (verbose or dry_run):
             continue
         reading = decision.reading
+        reason = _ACTION_REASON[decision.action].format(attrib=reading.attrib)
+        bmi = f"BMI {decision.row[3]}  " if decision.row and decision.row[3] != "" else ""
         lines.append(
             f"  {_ACTION_TEXT[decision.action]}  "
             f"{sheets.format_datetime(reading.local)}  "
             f"{sync.grams_to_pounds(reading.grams)} {cfg.unit_label}  "
-            f"id={reading.point_id}{_ACTION_REASON[decision.action]}"
+            f"{bmi}id={reading.point_id}{reason}"
+        )
+    if result.count("new") and result.height_m is None:
+        lines.append(
+            "note: the Withings profile has no height, so the BMI column is left empty"
         )
     if result.unparsed_rows:
         lines.append(

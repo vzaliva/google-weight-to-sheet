@@ -10,9 +10,10 @@ API (Fitbit Aria), which is where the name comes from; only the sheet is Google
 now. Rows written by that version, or by an older Fitbit sync, stay in the
 sheet, and Withings rows are added after them.
 
-> **Status:** the Withings source is new. It follows the public API reference
-> and its unit tests pass, but it has not been run against a live Withings
-> account yet. Run `check` and `sync --dry-run` before the first real sync.
+> **Status:** the Withings source is new. `auth` and `check` have been run
+> against a live Withings account with a Body Smart scale, which confirmed the
+> response shape described below. A full `sync` has not been run yet. Run
+> `check` and `sync --dry-run` before the first real sync.
 
 ## What it does
 
@@ -30,7 +31,7 @@ Rows have five columns, in the layout the old Fitbit scripts used:
 | A | Date and time, as text, in the Withings account's time zone | `November 3, 2026 at 07:05AM` |
 | B | Weight in pounds, one decimal | `174.2` |
 | C | Unit label (configurable) | `pounds` |
-| D | BMI | empty: Withings does not send it |
+| D | BMI, two decimals, from the newest height in your Withings profile | `24.38` |
 | E | Withings measure group id (`grpid`) | `5765432101` |
 
 A measurement is skipped when column E already holds its id **or** when a row
@@ -38,10 +39,14 @@ has the same minute and the same weight. The second rule is what keeps rows
 written by an older tool, which have different ids or none, from being added
 twice. Running the tool again and again is safe.
 
-A weigh-in that Withings marks as **ambiguous** is not written. Withings uses
-that mark when a scale shared by several people could not tell who stood on it.
-The log names such weigh-ins. Confirm it in the Withings app and a later sync
-adds it, as long as it still falls in the sync window (see `--since` below).
+Only weigh-ins that Withings **attributes to you** are written: recognised by
+the scale as you, confirmed by you, or entered by hand for you. A scale shared
+by several people also produces weigh-ins it could not attribute, and when a
+person is added to a shared scale, Withings attaches copies of the other
+people's earlier weigh-ins to the new profile. Those are skipped, and the log
+names each one with its `attrib` value. If one is yours, assign it to yourself
+in the Withings app and a later sync adds it, as long as it still falls in the
+sync window (see `--since` below).
 
 It only ever appends. Rows that were already written are never changed or
 removed.
@@ -220,10 +225,17 @@ API response and may contain personal data, so keep it out of the repository.
   day of margin on each side and readings outside the window are dropped.
 - Withings answers HTTP 200 even for most errors. The `status` in the body is
   the real outcome, and anything but 0 is reported as an error.
-- Each measure group carries a Unix `date`, an `attrib` (how sure Withings is
-  that it is yours) and the weight as `value × 10^unit` kg. The answer also
+- Each measure group carries a Unix `date`, an `attrib` (whose weigh-in
+  Withings says it is) and the weight as `value × 10^unit` kg. Only attrib 0
+  and 8 (recognised by the scale), 2 (entered by hand) and 7 (confirmed) count
+  as yours. Live data also has 10009, which the reference does not list, on
+  copies of other people's weigh-ins. The answer also
   names the account's time zone. Column A is the `date` in that zone, or in the
   machine's own zone if the answer names none.
+- Height: the same call with `meastype=4` and no date range, for the newest
+  height in the profile. Withings sends no BMI, so column D is worked out from
+  the weight and that height. Without a height in the profile, D stays empty
+  and the log says so.
 - Tokens: OAuth 2.0 with `https://account.withings.com/oauth2_user/authorize2`
   and `https://wbsapi.withings.net/v2/oauth2` (`action=requesttoken`), scope
   `user.metrics` only.
@@ -242,10 +254,19 @@ API response and may contain personal data, so keep it out of the repository.
 | `Withings refused the authorization code` | More than 30 seconds passed before the code was exchanged (when pasting the address), or the redirect URI does not match. Run `auth withings` again |
 | `cannot listen on localhost:8085` | Another program uses the port. Stop it, or register another callback URL and change `redirect_uri` to match |
 | `Withings status 601` | Too many requests. Try again later |
-| `Withings is not sure this weigh-in is yours` | The scale could not tell which of its users stood on it. Confirm the weigh-in in the Withings app |
+| `Withings does not say this weigh-in is yours, attrib=N` | The scale could not tell who stood on it (1), or the weigh-in is a copy of someone else's (10009). If it is yours, assign it to yourself in the Withings app |
 | `HTTP 403 ... has not been used in project` | Enable the Google Sheets API in the Cloud project |
 | `no tab named 'X'` | `sheet_name` does not match the tab. Names are case-sensitive |
 | `row(s) ... have a date this tool cannot read` | Column A holds a date in a format the tool does not know. Those rows are ignored for duplicate checks; new rows are still appended correctly |
+
+## Privacy
+
+This tool runs on your own machine, under your own Withings and Google
+credentials, which stay in your config directory. It reads your weight
+measurements from Withings and writes them to your Google Sheet. It sends them
+nowhere else: there is no server in between, no analytics and no telemetry, and
+the author receives nothing. The Google OAuth app and the Withings developer
+application are your own, created during setup.
 
 ## Development
 

@@ -4,9 +4,10 @@ Rows written by earlier syncs (Fitbit, then the Google Health API) carry other
 ids or none, so a reading counts as already present when either its id is in
 column E or a row has the same minute and the same weight.
 
-A reading Withings marks as ambiguous is left out: the scale could not tell
-who stood on it, and the sheet is append-only, so another person's weigh-in
-would stay in it for good.
+Only readings Withings attributes to the user are written. A scale shared by
+several people produces weigh-ins it could not attribute, and Withings attaches
+copies of other people's weigh-ins to a newly added user. The sheet is
+append-only, so someone else's weight would stay in it for good.
 """
 
 from __future__ import annotations
@@ -35,6 +36,16 @@ def _round_half_up_tenths(value: float) -> int:
 def grams_to_pounds(grams: float) -> float:
     """Pounds to one decimal, rounded half up, the way the sheet's existing rows were."""
     return _round_half_up_tenths(grams / 1000 * KG_TO_LB) / 10
+
+
+def bmi(grams: float, height_m: float | None) -> float | str:
+    """BMI to two decimals, rounded half up like the sheet's existing rows.
+
+    An empty cell when there is no height to compute it from.
+    """
+    if not height_m:
+        return ""
+    return math.floor(grams / 1000 / height_m**2 * 100 + 0.5) / 100
 
 
 def normalise_id(value: Any) -> str:
@@ -89,12 +100,15 @@ def index_rows(rows: list[list[Any]]) -> ExistingIndex:
 @dataclass(frozen=True)
 class Decision:
     reading: withings.Reading
-    action: str  # "new", "skip-id", "skip-ambiguous" or "skip-match"
+    action: str  # "new", "skip-id", "skip-unattributed" or "skip-match"
     row: list[Any] | None = None
 
 
 def plan_rows(
-    readings: list[withings.Reading], index: ExistingIndex, unit_label: str
+    readings: list[withings.Reading],
+    index: ExistingIndex,
+    unit_label: str,
+    height_m: float | None = None,
 ) -> list[Decision]:
     """Decide for each reading, oldest first, whether it needs a new row."""
     ids = set(index.ids)
@@ -105,8 +119,8 @@ def plan_rows(
         key = (reading.local.replace(second=0, microsecond=0), _round_half_up_tenths(pounds))
         if reading.point_id in ids:
             decisions.append(Decision(reading, "skip-id"))
-        elif reading.ambiguous:
-            decisions.append(Decision(reading, "skip-ambiguous"))
+        elif not reading.attributed:
+            decisions.append(Decision(reading, "skip-unattributed"))
         elif key in keys:
             decisions.append(Decision(reading, "skip-match"))
         else:
@@ -114,7 +128,7 @@ def plan_rows(
                 sheets.format_datetime(reading.local),
                 pounds,
                 unit_label,
-                "",
+                bmi(reading.grams, height_m),
                 reading.point_id,
             ]
             decisions.append(Decision(reading, "new", row))
@@ -165,6 +179,7 @@ class SyncResult:
     appended: int
     existing_rows: int
     unparsed_rows: int
+    height_m: float | None = None
 
     def count(self, action: str) -> int:
         return sum(1 for d in self.decisions if d.action == action)
@@ -195,7 +210,10 @@ def run_sync(
     readings = [withings.parse_reading(group, timezone) for group in groups]
     # The request had a day of margin for time zones; keep the window exact.
     readings = [r for r in readings if start <= r.local.date() < end]
-    decisions = plan_rows(readings, index, cfg.unit_label)
+    # Column D is a BMI, as in the rows the Fitbit sync wrote; Withings has the
+    # height but sends no BMI, so it is worked out here.
+    height_m = withings.latest_height(withings_session) if readings else None
+    decisions = plan_rows(readings, index, cfg.unit_label, height_m)
     new_rows = [d.row for d in decisions if d.row is not None]
     if new_rows and not dry_run:
         sheets.append_rows(sheets_session, spreadsheet_id, cfg.sheet_name, new_rows)
@@ -207,4 +225,5 @@ def run_sync(
         appended=0 if dry_run else len(new_rows),
         existing_rows=index.rows,
         unparsed_rows=index.unparsed,
+        height_m=height_m,
     )

@@ -45,10 +45,13 @@ version, which read the Google Health API.
   earlier Fitbit-based sync and by the Google Health version of this tool. The
   layout and the duplicate rules live in `sync.py` and `sheets.py`; changing
   them affects rows users already have.
-- The Withings response shape in the tests comes from the public reference
-  (https://developer.withings.com/openapi.yaml), not from a captured response.
-  Confirm a field against real data with
-  `uv run google-weight-to-sheet check --dump FILE` before relying on it.
+- The Withings response shape in the tests follows the public reference
+  (https://developer.withings.com/openapi.yaml) and was checked against a live
+  Body Smart response. The reference is incomplete: live `attrib` values include
+  10009, which it does not list, so the sync accepts only the documented values
+  that mean "this user's own" and skips the rest. Confirm any other field
+  against real data with `uv run google-weight-to-sheet check --dump FILE`
+  before relying on it, and never commit such a dump.
 - Withings answers HTTP 200 for most errors; the `status` in the body is the
   real outcome. `withings.call` turns a non-zero status into `WithingsError`.
 - Every Withings refresh rotates the refresh token, and the old one dies once
