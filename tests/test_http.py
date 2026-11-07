@@ -9,7 +9,7 @@ def test_returns_the_json_body():
     session = FakeSession(FakeResponse(200, {"ok": True}))
     assert request_json(session, "GET", "https://x/y", params={"a": 1}) == {"ok": True}
     assert session.calls == [
-        {"method": "GET", "url": "https://x/y", "params": {"a": 1}, "json": None}
+        {"method": "GET", "url": "https://x/y", "params": {"a": 1}, "data": None, "json": None}
     ]
 
 
@@ -34,3 +34,9 @@ def test_client_errors_are_not_retried_and_carry_the_body():
         request_json(session, "GET", "https://x", sleep=lambda _: None)
     assert caught.value.status == 403
     assert len(session.calls) == 1
+
+
+def test_form_data_is_passed_through():
+    session = FakeSession(FakeResponse(200, {"status": 0}))
+    request_json(session, "POST", "https://x", data={"action": "getmeas"})
+    assert session.calls[0]["data"] == {"action": "getmeas"}

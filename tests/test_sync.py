@@ -2,17 +2,17 @@ import json
 from datetime import date, datetime
 
 import pytest
-from conftest import FakeResponse, FakeSession, make_point
+from conftest import FakeResponse, FakeSession, make_group, measure_answer
 
-from google_weight_to_sheet import health, sync
+from google_weight_to_sheet import sync, withings
 from google_weight_to_sheet.config import Config
 from google_weight_to_sheet.errors import ConfigError
 
 TODAY = date(2026, 11, 5)
 
 
-def reading(point_id, when, grams):
-    return health.Reading(point_id, when, grams)
+def reading(point_id, when, grams, ambiguous=False):
+    return withings.Reading(point_id, when, grams, ambiguous)
 
 
 # --- units -----------------------------------------------------------------
@@ -83,6 +83,24 @@ def test_a_different_weight_in_the_same_minute_is_new():
     assert decision.action == "new"
 
 
+def test_an_ambiguous_weigh_in_is_left_out():
+    [decision] = sync.plan_rows(
+        [reading("amb", datetime(2026, 11, 3, 7, 5), 61000, ambiguous=True)],
+        sync.ExistingIndex(),
+        "pounds",
+    )
+    assert decision.action == "skip-ambiguous"
+    assert decision.row is None
+
+
+def test_an_ambiguous_weigh_in_already_in_the_sheet_is_reported_by_id():
+    index = sync.index_rows([["x", 1, "pounds", "", "amb"]])
+    [decision] = sync.plan_rows(
+        [reading("amb", datetime(2026, 11, 3, 7, 5), 61000, ambiguous=True)], index, "pounds"
+    )
+    assert decision.action == "skip-id"
+
+
 def test_decisions_are_oldest_first_and_do_not_repeat_within_a_batch():
     readings = [
         reading("b", datetime(2026, 11, 4, 7, 0), 79400),
@@ -135,16 +153,16 @@ def make_cfg(tmp_path):
     return Config(config_dir=tmp_path, spreadsheet_id="sheet-id")
 
 
-def routed(rows, points):
-    """A session that serves the sheet, the Health API, and records appends."""
+def routed(rows, groups):
+    """A session that serves the sheet, the Withings API, and records appends."""
 
     def handler(method, url, params, body):
         if "sheets.googleapis.com" in url and method == "GET":
             return FakeResponse(200, {"values": rows})
         if "sheets.googleapis.com" in url and method == "POST":
             return FakeResponse(200, {})
-        if "health.googleapis.com" in url:
-            return FakeResponse(200, {"dataPoints": points})
+        if "wbsapi.withings.net" in url:
+            return FakeResponse(200, measure_answer(groups))
         raise AssertionError(f"unexpected request {method} {url}")
 
     return FakeSession(handler=handler)
@@ -154,53 +172,87 @@ LEGACY_ROW = ["November 2, 2026 at 07:01AM", 175.0, "pounds", 24.1, 176200000000
 
 
 def test_run_appends_only_what_is_missing(tmp_path):
-    points = [
-        make_point("old", 2026, 11, 2, 7, 1, 79400),  # same minute and weight as the legacy row
-        make_point("fresh", 2026, 11, 4, 7, 30, 79000),
+    groups = [
+        make_group(101, 2026, 11, 2, 7, 1, 79400),  # same minute and weight as the legacy row
+        make_group(102, 2026, 11, 4, 7, 30, 79000),
     ]
-    session = routed([LEGACY_ROW], points)
+    session = routed([LEGACY_ROW], groups)
     result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
 
     assert [d.action for d in result.decisions] == ["skip-match", "new"]
     assert result.appended == 1
-    post = [c for c in session.calls if c["method"] == "POST"]
+    post = [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
     assert len(post) == 1
-    assert post[0]["json"]["values"] == [["November 4, 2026 at 07:30AM", 174.2, "pounds", "", "fresh"]]
+    assert post[0]["json"]["values"] == [["November 4, 2026 at 07:30AM", 174.2, "pounds", "", "102"]]
+
+
+def test_run_asks_withings_for_the_window_with_margin(tmp_path):
+    session = routed([LEGACY_ROW], [])
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
+    [ask] = [c for c in session.calls if "withings" in c["url"]]
+    assert (result.start, result.end) == (date(2026, 11, 1), date(2026, 11, 7))
+    assert (ask["data"]["startdate"], ask["data"]["enddate"]) == withings.window_timestamps(
+        date(2026, 11, 1), date(2026, 11, 7)
+    )
+
+
+def test_readings_in_the_margin_outside_the_window_are_dropped(tmp_path):
+    groups = [
+        make_group(100, 2026, 10, 31, 23, 0, 79400),  # the day before the window
+        make_group(101, 2026, 11, 1, 7, 0, 79400),
+        make_group(102, 2026, 11, 7, 0, 30, 79400),  # the day after it
+    ]
+    session = routed([LEGACY_ROW], groups)
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
+    assert [d.reading.point_id for d in result.decisions] == ["101"]
+    assert result.fetched == 1
+
+
+def test_an_ambiguous_weigh_in_is_not_written(tmp_path):
+    groups = [make_group(103, 2026, 11, 4, 7, 30, 61000, attrib=withings.AMBIGUOUS)]
+    session = routed([LEGACY_ROW], groups)
+    result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
+    assert result.count("skip-ambiguous") == 1
+    assert result.appended == 0
+    assert not [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
 
 
 def test_dry_run_writes_nothing(tmp_path):
-    session = routed([], [make_point("fresh", 2026, 11, 4, 7, 30, 79000)])
+    session = routed([], [make_group(102, 2026, 11, 4, 7, 30, 79000)])
     result = sync.run_sync(session, session, make_cfg(tmp_path), dry_run=True, today=TODAY)
     assert result.count("new") == 1
     assert result.appended == 0
-    assert not [c for c in session.calls if c["method"] == "POST"]
+    assert not [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
 
 
 def test_nothing_new_means_no_append(tmp_path):
-    session = routed([LEGACY_ROW], [make_point("old", 2026, 11, 2, 7, 1, 79400)])
+    session = routed([LEGACY_ROW], [make_group(101, 2026, 11, 2, 7, 1, 79400)])
     result = sync.run_sync(session, session, make_cfg(tmp_path), today=TODAY)
     assert result.appended == 0
-    assert not [c for c in session.calls if c["method"] == "POST"]
+    assert not [c for c in session.calls if c["method"] == "POST" and "sheets" in c["url"]]
 
 
 def test_running_twice_does_not_duplicate(tmp_path):
-    points = [make_point("fresh", 2026, 11, 4, 7, 30, 79000)]
-    first = routed([LEGACY_ROW], points)
+    groups = [make_group(102, 2026, 11, 4, 7, 30, 79000)]
+    first = routed([LEGACY_ROW], groups)
     sync.run_sync(first, first, make_cfg(tmp_path), today=TODAY)
-    appended = next(c for c in first.calls if c["method"] == "POST")["json"]["values"]
+    appended = next(c for c in first.calls if "sheets" in c["url"] and c["method"] == "POST")
+    rows = appended["json"]["values"]
 
-    second = routed([LEGACY_ROW, *appended], points)
+    second = routed([LEGACY_ROW, *rows], groups)
     result = sync.run_sync(second, second, make_cfg(tmp_path), today=TODAY)
     assert result.appended == 0
     assert result.decisions[0].action == "skip-id"
 
 
-def test_dump_saves_the_raw_response_privately(tmp_path):
-    point = make_point("fresh", 2026, 11, 4, 7, 30, 79000)
-    session = routed([], [point])
+def test_dump_saves_the_raw_answer_privately(tmp_path):
+    group = make_group(102, 2026, 11, 4, 7, 30, 79000)
+    session = routed([], [group])
     dump = tmp_path / "raw.json"
     sync.run_sync(session, session, make_cfg(tmp_path), dry_run=True, today=TODAY, dump_path=dump)
-    assert json.loads(dump.read_text())["dataPoints"] == [point]
+    saved = json.loads(dump.read_text())
+    assert saved["measuregrps"] == [group]
+    assert saved["timezone"] == "America/Los_Angeles"
     assert dump.stat().st_mode & 0o777 == 0o600
 
 
@@ -209,20 +261,20 @@ def test_run_requires_a_spreadsheet(tmp_path):
         sync.run_sync(FakeSession(), FakeSession(), Config(config_dir=tmp_path), today=TODAY)
 
 
-def test_health_and_sheets_requests_use_their_own_session(tmp_path):
-    points = [make_point("fresh", 2026, 11, 4, 7, 30, 79000)]
+def test_withings_and_sheets_requests_use_their_own_session(tmp_path):
+    groups = [make_group(102, 2026, 11, 4, 7, 30, 79000)]
 
-    def health_handler(method, url, params, body):
-        return FakeResponse(200, {"dataPoints": points})
+    def withings_handler(method, url, params, body):
+        return FakeResponse(200, measure_answer(groups))
 
     def sheets_handler(method, url, params, body):
         return FakeResponse(200, {"values": [LEGACY_ROW]} if method == "GET" else {})
 
-    health_session = FakeSession(handler=health_handler)
+    withings_session = FakeSession(handler=withings_handler)
     sheets_session = FakeSession(handler=sheets_handler)
-    sync.run_sync(health_session, sheets_session, make_cfg(tmp_path), today=TODAY)
+    sync.run_sync(withings_session, sheets_session, make_cfg(tmp_path), today=TODAY)
 
-    assert health_session.calls
-    assert all("health.googleapis.com" in c["url"] for c in health_session.calls)
+    assert withings_session.calls
+    assert all("wbsapi.withings.net" in c["url"] for c in withings_session.calls)
     assert all("sheets.googleapis.com" in c["url"] for c in sheets_session.calls)
     assert {c["method"] for c in sheets_session.calls} == {"GET", "POST"}

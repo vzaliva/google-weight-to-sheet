@@ -10,7 +10,7 @@ from .errors import ApiError
 
 TIMEOUT_SECONDS = 30
 MAX_ATTEMPTS = 4
-# Google asks clients to back off on these and try again.
+# Rate limits and server errors: back off and try again.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
@@ -20,6 +20,7 @@ def request_json(
     url: str,
     *,
     params: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
     json: Any = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Any:
@@ -30,7 +31,7 @@ def request_json(
     """
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = session.request(
-            method, url, params=params, json=json, timeout=TIMEOUT_SECONDS
+            method, url, params=params, data=data, json=json, timeout=TIMEOUT_SECONDS
         )
         if response.status_code in RETRY_STATUSES and attempt < MAX_ATTEMPTS:
             sleep(2**attempt)

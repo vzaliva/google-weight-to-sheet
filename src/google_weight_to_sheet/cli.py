@@ -9,32 +9,40 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import __version__, auth, health, sheets, sync
+from . import __version__, auth, sheets, sync, withings, withings_auth
 from .config import Config, load_config
-from .errors import ApiError, SyncError
+from .errors import SyncError
 
+SERVICES = ("withings", "sheets")
 _ACTION_TEXT = {
     "new": "NEW ",
     "skip-id": "skip",
+    "skip-ambiguous": "skip",
     "skip-match": "skip",
 }
 _ACTION_REASON = {
     "new": "",
     "skip-id": "  (already in the sheet: same id)",
+    "skip-ambiguous": (
+        "  (Withings is not sure this weigh-in is yours; confirm it in the Withings app "
+        "and run sync again)"
+    ),
     "skip-match": "  (already in the sheet: same date and weight)",
 }
+# Shown in the log even without --verbose, because the user has to act on them.
+_ALWAYS_SHOWN = frozenset({"new", "skip-ambiguous"})
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="google-weight-to-sheet",
-        description="Sync body weight from the Google Health API into a Google Sheet.",
+        description="Sync body weight from a Withings scale into a Google Sheet.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument(
         "--config-dir",
         type=Path,
-        help="directory with config.toml, client_secret.json and the token files "
+        help="directory with config.toml, the client files and the token files "
         "(default: ~/.config/google-weight-to-sheet)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -45,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auth.add_argument(
         "service",
         nargs="?",
-        choices=[*auth.SERVICES, "all"],
+        choices=[*SERVICES, "all"],
         default="all",
         help="which API to authorise; each one is a separate consent (default: all)",
     )
@@ -56,11 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=0,
-        help="port for the local redirect (default: any free port)",
+        help="port for the Google redirect (default: any free port); the Withings "
+        "port is part of its redirect_uri",
     )
 
     p_check = commands.add_parser(
-        "check", help="verify access and show the newest raw weight data point"
+        "check", help="verify Withings access and show the newest raw weight measurement"
     )
     p_check.add_argument(
         "--days", type=int, default=30, help="how far back to look (default: 30)"
@@ -94,23 +103,24 @@ def _stamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _open_session(cfg: Config, service: auth.Service) -> Any:
-    return auth.make_session(auth.load_credentials(cfg, service))
+def _open_sheets_session(cfg: Config) -> Any:
+    return auth.make_session(auth.load_credentials(cfg, auth.SHEETS))
 
 
-def _verify_health(session: Any) -> None:
-    try:
-        identity = health.get_identity(session)
-    except ApiError as exc:
-        if "ACCOUNT_NOT_LINKED" in exc.body:
-            print(
-                "warning: this Google Account is not linked to Google Health yet. Sign in "
-                "to the Google Health app with it, then run `check`.",
-                file=sys.stderr,
-            )
-            return
-        raise
-    print(f"signed in to the Health API as {identity.get('healthUserId', '<unknown id>')}")
+def _fetch_recent(
+    session: Any, days: int
+) -> tuple[date, date, list[dict[str, Any]], str | None]:
+    today = date.today()
+    start, end = today - timedelta(days=days), today + timedelta(days=2)
+    groups, timezone = withings.list_weight_groups(
+        session, *withings.window_timestamps(start, end)
+    )
+    return start, end, groups, timezone
+
+
+def _verify_withings(session: Any) -> None:
+    _, _, groups, _ = _fetch_recent(session, 30)
+    print(f"the Withings token works: {len(groups)} weight measurement(s) in the last 30 days")
 
 
 def _verify_sheets(cfg: Config, session: Any) -> None:
@@ -121,40 +131,42 @@ def _verify_sheets(cfg: Config, session: Any) -> None:
 
 
 def cmd_auth(cfg: Config, args: argparse.Namespace) -> int:
-    names = list(auth.SERVICES) if args.service == "all" else [args.service]
+    names = SERVICES if args.service == "all" else (args.service,)
     for name in names:
-        service = auth.SERVICES[name]
-        creds = auth.authorize(
-            cfg, service, port=args.port, open_browser=not args.no_browser
-        )
-        print(f"{name} token saved to {auth.token_path(cfg, service)}")
-        session = auth.make_session(creds)
-        if service is auth.HEALTH:
-            _verify_health(session)
+        if name == "withings":
+            token = withings_auth.authorize(cfg, open_browser=not args.no_browser)
+            print(
+                f"withings token for user {token['userid'] or '<unknown>'} saved to "
+                f"{withings_auth.token_path(cfg)}"
+            )
+            _verify_withings(withings_auth.open_session(cfg))
         else:
-            _verify_sheets(cfg, session)
+            creds = auth.authorize(
+                cfg, auth.SHEETS, port=args.port, open_browser=not args.no_browser
+            )
+            print(f"sheets token saved to {auth.token_path(cfg, auth.SHEETS)}")
+            _verify_sheets(cfg, auth.make_session(creds))
     return 0
 
 
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
-    session = _open_session(cfg, auth.HEALTH)
-    identity = health.get_identity(session)
-    print(f"Health API user: {identity.get('healthUserId', '<unknown id>')}")
-    today = date.today()
-    start, end = today - timedelta(days=args.days), today + timedelta(days=2)
-    points = list(health.list_weight_points(session, start, end))
-    print(f"{len(points)} weight data point(s) from {start} to {today}")
+    session = withings_auth.open_session(cfg)
+    print(f"Withings user: {withings_auth.load_token(cfg).get('userid') or '<unknown>'}")
+    start, end, groups, timezone = _fetch_recent(session, args.days)
+    print(f"{len(groups)} weight measurement(s) since {start}")
+    print("account time zone:", timezone or "none given, so this machine's is used")
     if args.dump:
-        payload = {"start": start.isoformat(), "end": end.isoformat(), "dataPoints": points}
-        auth.write_private(args.dump, json.dumps(payload, indent=2) + "\n")
+        auth.write_private(args.dump, sync.dump_text(start, end, timezone, groups))
         print(f"raw response saved to {args.dump}")
-    if points:
-        print("first data point in the response (newest first):")
-        print(json.dumps(points[0], indent=2))
-        reading = health.parse_reading(points[0])
+    if groups:
+        newest = max(groups, key=lambda group: group.get("date") or 0)
+        print("newest measure group:")
+        print(json.dumps(newest, indent=2))
+        reading = withings.parse_reading(newest, timezone)
         print(
             f"parsed as: {sheets.format_datetime(reading.local)}, "
             f"{sync.grams_to_pounds(reading.grams)} pounds, id {reading.point_id}"
+            + (" (ambiguous: sync skips it until it is confirmed)" if reading.ambiguous else "")
         )
     return 0
 
@@ -162,8 +174,8 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
 def format_report(result: sync.SyncResult, cfg: Config, *, dry_run: bool, verbose: bool) -> str:
     lines = []
     for decision in result.decisions:
-        # New rows always go in the log; skipped ones only when asked for.
-        if decision.action != "new" and not (verbose or dry_run):
+        # New rows always go in the log; plain skips only when asked for.
+        if decision.action not in _ALWAYS_SHOWN and not (verbose or dry_run):
             continue
         reading = decision.reading
         lines.append(
@@ -180,7 +192,7 @@ def format_report(result: sync.SyncResult, cfg: Config, *, dry_run: bool, verbos
     summary = (
         f"{_stamp()} window {result.start}..{result.end} "
         f"fetched={result.fetched} new={result.count('new')} "
-        f"skipped={result.count('skip-id') + result.count('skip-match')} "
+        f"skipped={len(result.decisions) - result.count('new')} "
         f"appended={result.appended}"
     )
     if dry_run:
@@ -190,10 +202,10 @@ def format_report(result: sync.SyncResult, cfg: Config, *, dry_run: bool, verbos
 
 
 def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
-    health_session = _open_session(cfg, auth.HEALTH)
-    sheets_session = _open_session(cfg, auth.SHEETS)
+    withings_session = withings_auth.open_session(cfg)
+    sheets_session = _open_sheets_session(cfg)
     result = sync.run_sync(
-        health_session,
+        withings_session,
         sheets_session,
         cfg,
         dry_run=args.dry_run,

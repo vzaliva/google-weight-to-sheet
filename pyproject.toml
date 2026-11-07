@@ -1,7 +1,7 @@
 [project]
 name = "google-weight-to-sheet"
 version = "0.1.0"
-description = "Sync body weight from the Google Health API (Fitbit Aria and other scales) into a Google Sheet"
+description = "Sync body weight from a Withings smart scale into a Google Sheet"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

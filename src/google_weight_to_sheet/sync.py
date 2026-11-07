@@ -1,8 +1,12 @@
 """The sync itself: decide which readings are new and append them.
 
-Rows written by the earlier Fitbit-based sync have no data point id that
-matches the Health API's, so a reading counts as already present when either
-its id is in column E or a row has the same minute and the same weight.
+Rows written by earlier syncs (Fitbit, then the Google Health API) carry other
+ids or none, so a reading counts as already present when either its id is in
+column E or a row has the same minute and the same weight.
+
+A reading Withings marks as ambiguous is left out: the scale could not tell
+who stood on it, and the sheet is append-only, so another person's weigh-in
+would stay in it for good.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import health, sheets
+from . import sheets, withings
 from .auth import write_private
 from .config import Config
 
@@ -84,13 +88,13 @@ def index_rows(rows: list[list[Any]]) -> ExistingIndex:
 
 @dataclass(frozen=True)
 class Decision:
-    reading: health.Reading
-    action: str  # "new", "skip-id" or "skip-match"
+    reading: withings.Reading
+    action: str  # "new", "skip-id", "skip-ambiguous" or "skip-match"
     row: list[Any] | None = None
 
 
 def plan_rows(
-    readings: list[health.Reading], index: ExistingIndex, unit_label: str
+    readings: list[withings.Reading], index: ExistingIndex, unit_label: str
 ) -> list[Decision]:
     """Decide for each reading, oldest first, whether it needs a new row."""
     ids = set(index.ids)
@@ -101,6 +105,8 @@ def plan_rows(
         key = (reading.local.replace(second=0, microsecond=0), _round_half_up_tenths(pounds))
         if reading.point_id in ids:
             decisions.append(Decision(reading, "skip-id"))
+        elif reading.ambiguous:
+            decisions.append(Decision(reading, "skip-ambiguous"))
         elif key in keys:
             decisions.append(Decision(reading, "skip-match"))
         else:
@@ -139,6 +145,17 @@ def choose_window(
     return min(start, today), end
 
 
+def dump_text(start: date, end: date, timezone: str | None, groups: list[dict[str, Any]]) -> str:
+    """The raw answer as saved by --dump; it holds personal health data."""
+    payload = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "timezone": timezone,
+        "measuregrps": groups,
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
 @dataclass
 class SyncResult:
     start: date
@@ -154,7 +171,7 @@ class SyncResult:
 
 
 def run_sync(
-    health_session: Any,
+    withings_session: Any,
     sheets_session: Any,
     cfg: Config,
     *,
@@ -169,12 +186,15 @@ def run_sync(
     index = index_rows(rows)
     start, end = choose_window(index, today or date.today(), days=days, since=since)
 
-    points = list(health.list_weight_points(health_session, start, end))
+    groups, timezone = withings.list_weight_groups(
+        withings_session, *withings.window_timestamps(start, end)
+    )
     if dump_path is not None:
-        payload = {"start": start.isoformat(), "end": end.isoformat(), "dataPoints": points}
-        write_private(dump_path, json.dumps(payload, indent=2) + "\n")
+        write_private(dump_path, dump_text(start, end, timezone, groups))
 
-    readings = [health.parse_reading(point) for point in points]
+    readings = [withings.parse_reading(group, timezone) for group in groups]
+    # The request had a day of margin for time zones; keep the window exact.
+    readings = [r for r in readings if start <= r.local.date() < end]
     decisions = plan_rows(readings, index, cfg.unit_label)
     new_rows = [d.row for d in decisions if d.row is not None]
     if new_rows and not dry_run:
@@ -182,7 +202,7 @@ def run_sync(
     return SyncResult(
         start=start,
         end=end,
-        fetched=len(points),
+        fetched=len(readings),
         decisions=decisions,
         appended=0 if dry_run else len(new_rows),
         existing_rows=index.rows,

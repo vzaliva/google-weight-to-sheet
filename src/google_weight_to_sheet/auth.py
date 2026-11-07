@@ -1,13 +1,9 @@
-"""OAuth for the Health API and the Sheets API, with one token for each.
-
-The Health API rejects a token that also carries a scope outside its own: it
-answers 403 DISALLOWED_OAUTH_SCOPES. So the two APIs cannot share a token. Each
-gets its own consent and its own token file, both made with the same OAuth
-client.
+"""Google OAuth for the Sheets API, and the private-file helper the tokens use.
 
 The browser consent happens with `authorize` on a machine that has a browser.
-The token files are then copied to wherever the sync runs; `load_credentials`
-refreshes them from there without any interaction.
+The token file is then copied to wherever the sync runs; `load_credentials`
+refreshes it from there without any interaction. Withings has its own OAuth in
+`withings_auth`.
 """
 
 from __future__ import annotations
@@ -20,9 +16,6 @@ from typing import Any
 from .config import Config
 from .errors import AuthError
 
-HEALTH_SCOPE = (
-    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly"
-)
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 
@@ -33,9 +26,7 @@ class Service:
     token_file: str
 
 
-HEALTH = Service("health", (HEALTH_SCOPE,), "health_token.json")
 SHEETS = Service("sheets", (SHEETS_SCOPE,), "sheets_token.json")
-SERVICES = {service.name: service for service in (HEALTH, SHEETS)}
 
 
 def token_path(cfg: Config, service: Service) -> Path:
